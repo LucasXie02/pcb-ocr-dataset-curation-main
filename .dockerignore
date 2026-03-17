@@ -1,0 +1,17 @@
+**/.git
+**/.gitignore
+**/.DS_Store
+**/__pycache__
+**/*.pyc
+**/*.pyo
+**/*.pyd
+**/*.swp
+**/*.swo
+**/*.tmp
+**/*.log
+**/*.sqlite
+**/*.db
+**/venv
+**/.venv
+Checkpoints
+Data

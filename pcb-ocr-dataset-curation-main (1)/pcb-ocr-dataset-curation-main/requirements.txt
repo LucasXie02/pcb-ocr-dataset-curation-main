@@ -1,0 +1,13 @@
+# Review tool (必装)
+flask>=3.0
+opencv-python-headless>=4.10
+numpy>=1.26
+pillow>=10.0
+
+# Detection pipeline (仅跑检测流水线时需要)
+# torch>=2.0
+# torchvision>=0.15
+# rfdetr>=1.3
+# supervision>=0.27
+# tqdm
+# pyyaml
