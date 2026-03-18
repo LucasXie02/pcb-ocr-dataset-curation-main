@@ -491,13 +491,14 @@ def validate_bbox(bbox: dict, img_width: int, img_height: int) -> tuple[bool, st
             return False, f"Bbox contains None: ({x1}, {y1}, {x2}, {y2})"
         x1, y1, x2, y2 = float(x1), float(y1), float(x2), float(y2)
 
-        # Clamp near-zero negative coordinates caused by floating point drift
-        x1, y1, x2, y2 = max(x1, 0.0), max(y1, 0.0), max(x2, 0.0), max(y2, 0.0)
-
-        # Check bbox is within image bounds (skip if dimensions unknown)
+        # Clamp coordinates to image bounds (floating point drift from canvas drag)
+        x1, y1 = max(x1, 0.0), max(y1, 0.0)
+        x2, y2 = max(x2, 0.0), max(y2, 0.0)
         if img_width is not None and img_height is not None:
-            if x2 > img_width or y2 > img_height:
-                return False, f"Bbox exceeds image bounds: ({x2}, {y2}) > ({img_width}, {img_height})"
+            x1 = min(x1, float(img_width))
+            y1 = min(y1, float(img_height))
+            x2 = min(x2, float(img_width))
+            y2 = min(y2, float(img_height))
 
         # Check bbox has positive area
         if x1 >= x2 or y1 >= y2:

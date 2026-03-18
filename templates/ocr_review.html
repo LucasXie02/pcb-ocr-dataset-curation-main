@@ -2087,6 +2087,10 @@
             editChars = JSON.parse(JSON.stringify(currentLineData.chars || []));
             editLineBbox = currentLineData.bbox ? JSON.parse(JSON.stringify(currentLineData.bbox)) : null;
 
+            // Restore delete button visibility (hidden during add-line mode)
+            const deleteBtn = document.getElementById('btn-delete-line');
+            if (deleteBtn) deleteBtn.style.display = '';
+
             editCanvas = document.getElementById('edit-canvas');
             editCtx = editCanvas.getContext('2d');
             editImage = document.getElementById('edit-image');
