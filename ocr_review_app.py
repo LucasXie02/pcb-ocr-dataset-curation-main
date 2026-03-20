@@ -2083,6 +2083,60 @@ def api_gallery():
                 'status': status,
             })
 
+        # --- Append ungrouped images (not in any component group) as standalone cards ---
+        grouped_image_ids = set()
+        for group in app_state.get('component_groups', []):
+            for inst in group.instances:
+                grouped_image_ids.add(inst.image_id)
+
+        annotations = app_state.get('annotations', [])
+        for img_ann in annotations:
+            if img_ann.image_id in grouped_image_ids:
+                continue
+            # This image is not in any component group — show as standalone card
+            ocr_texts = [line.ocr_text or line.det_text or '' for line in img_ann.lines]
+            has_unreviewed = False
+            has_reviewed = False
+            for line in img_ann.lines:
+                if event_store:
+                    line_status = event_store.get_line_status(line.line_uid)
+                    display_status = derive_display_status(line_status, line)
+                else:
+                    display_status = 'uncertain' if line.needs_review else 'accepted'
+                if display_status in ('uncertain', 'unknown'):
+                    has_unreviewed = True
+                elif display_status in ('reviewed', 'edited', 'accepted'):
+                    has_reviewed = True
+
+            if has_unreviewed and has_reviewed:
+                ug_status = 'partial'
+            elif has_unreviewed:
+                ug_status = 'pending'
+            else:
+                ug_status = 'reviewed'
+
+            if filter_mode == 'needs_review' and ug_status == 'reviewed':
+                continue
+            if filter_mode == 'reviewed' and ug_status != 'reviewed':
+                continue
+
+            thumb_url = f'/api/thumb/{img_ann.image_id}?annotated=1&_t={_ts}'
+
+            cards.append({
+                'group_id': img_ann.image_id,
+                'component_class': '',
+                'ocr_text': ', '.join(ocr_texts) if ocr_texts else '-',
+                'thumbnail': thumb_url,
+                'sibling_thumbs': [],
+                'confidence': 1.0,
+                'sibling_count': 1,
+                'agreement_ratio': '1/1',
+                'has_outliers': False,
+                'all_agree': True,
+                'status': ug_status,
+                'ungrouped': True,
+            })
+
         # Sort
         status_order = {'pending': 0, 'partial': 1, 'reviewed': 2}
         if sort == 'conf_asc':
@@ -2392,44 +2446,66 @@ def api_batch_accept():
         total_accepted = 0
         accepted_groups = 0
 
+        # Also index annotations by image_id for ungrouped images
+        annotations = app_state.get('annotations', [])
+        ann_by_id = {a.image_id: a for a in annotations}
+
         for rgid in region_group_ids:
             target_group = groups_by_id.get(rgid)
-            if not target_group:
-                logging.warning(f"Batch accept: group {rgid} not found, skipping")
-                continue
+            if target_group:
+                # Normal group accept
+                group_line_count = 0
+                for inst in target_group.instances:
+                    _accept_lines_in_instance(inst, inst.lines)
+                    for line in inst.lines:
+                        event_store.log_event(
+                            inst.image_id,
+                            line.line_uid,
+                            EventType.REVIEWED,
+                            {
+                                'action': 'batch_accept',
+                                'region_group_id': rgid,
+                                'ocr_text': line.ocr_text,
+                                'char_count': line.get_char_count(),
+                            }
+                        )
+                        group_line_count += 1
 
-            group_line_count = 0
-            for inst in target_group.instances:
-                _accept_lines_in_instance(inst, inst.lines)
-                for line in inst.lines:
+                if target_group.instances:
+                    rep = target_group.instances[0]
                     event_store.log_event(
-                        inst.image_id,
-                        line.line_uid,
-                        EventType.REVIEWED,
+                        rep.image_id,
+                        f'{rgid}#GROUP',
+                        EventType.GROUP_ACCEPTED,
                         {
-                            'action': 'batch_accept',
                             'region_group_id': rgid,
-                            'ocr_text': line.ocr_text,
-                            'char_count': line.get_char_count(),
+                            'sibling_count': len(target_group.instances),
+                            'accepted_lines': group_line_count,
                         }
                     )
-                    group_line_count += 1
 
-            if target_group.instances:
-                rep = target_group.instances[0]
-                event_store.log_event(
-                    rep.image_id,
-                    f'{rgid}#GROUP',
-                    EventType.GROUP_ACCEPTED,
-                    {
-                        'region_group_id': rgid,
-                        'sibling_count': len(target_group.instances),
-                        'accepted_lines': group_line_count,
-                    }
-                )
-
-            total_accepted += group_line_count
-            accepted_groups += 1
+                total_accepted += group_line_count
+                accepted_groups += 1
+            elif rgid in ann_by_id:
+                # Ungrouped image: rgid is the image_id
+                img_ann = ann_by_id[rgid]
+                if img_ann.lines:
+                    _accept_lines_in_instance(img_ann, img_ann.lines)
+                    for line in img_ann.lines:
+                        event_store.log_event(
+                            img_ann.image_id,
+                            line.line_uid,
+                            EventType.REVIEWED,
+                            {
+                                'action': 'batch_accept_ungrouped',
+                                'ocr_text': line.ocr_text,
+                                'char_count': line.get_char_count(),
+                            }
+                        )
+                        total_accepted += 1
+                    accepted_groups += 1
+            else:
+                logging.warning(f"Batch accept: group/image {rgid} not found, skipping")
 
         invalidate_metrics()
 
@@ -2503,6 +2579,43 @@ def api_batch_accept_agreeing():
                 )
                 accepted_groups += 1
                 accepted_lines += group_line_count
+
+        # Also accept ungrouped images (not in any component group) that have unreviewed lines
+        grouped_image_ids = set()
+        for group in component_groups:
+            for inst in group.instances:
+                grouped_image_ids.add(inst.image_id)
+
+        annotations = app_state.get('annotations', [])
+        for img_ann in annotations:
+            if img_ann.image_id in grouped_image_ids:
+                continue
+            if not img_ann.lines:
+                continue
+            unreviewed = []
+            for line in img_ann.lines:
+                if event_store:
+                    line_status = event_store.get_line_status(line.line_uid)
+                    status = derive_display_status(line_status, line)
+                else:
+                    status = 'uncertain' if line.needs_review else 'accepted'
+                if status not in ('accepted', 'reviewed', 'edited'):
+                    unreviewed.append(line)
+            if unreviewed:
+                _accept_lines_in_instance(img_ann, unreviewed)
+                for line in unreviewed:
+                    event_store.log_event(
+                        img_ann.image_id,
+                        line.line_uid,
+                        EventType.REVIEWED,
+                        {
+                            'action': 'batch_accept_ungrouped',
+                            'ocr_text': line.ocr_text,
+                            'char_count': line.get_char_count(),
+                        }
+                    )
+                    accepted_lines += 1
+                accepted_groups += 1
 
         if accepted_groups > 0:
             invalidate_metrics()
@@ -2842,21 +2955,31 @@ def api_finish_review():
 
         eligible = []
         blocked = []
+        blocked_details = []  # {image_id, blocking_lines: [{line_uid, status}]}
 
-        allowed_statuses = {'accepted', 'edited', 'reviewed'}
+        allowed_statuses = {'accepted', 'edited', 'reviewed', 'deleted'}
 
         for img_ann in annotations:
             all_ok = True
+            blocking_lines = []
             for line in img_ann.lines:
                 line_status = event_store.get_line_status(line.line_uid)
                 display_status = derive_display_status(line_status, line)
                 if display_status not in allowed_statuses:
                     all_ok = False
-                    break
+                    blocking_lines.append({
+                        'line_uid': line.line_uid,
+                        'status': display_status,
+                        'ocr_text': line.ocr_text or line.det_text or '',
+                    })
             if all_ok:
                 eligible.append(img_ann)
             else:
                 blocked.append(img_ann.image_id)
+                blocked_details.append({
+                    'image_id': img_ann.image_id,
+                    'blocking_lines': blocking_lines,
+                })
 
         moved = []
         errors = []
@@ -2921,6 +3044,7 @@ def api_finish_review():
             'blocked_count': len(blocked),
             'moved_images': moved,
             'blocked_images': blocked,
+            'blocked_details': blocked_details[:20],  # Limit to 20 for response size
             'errors': errors
         })
 

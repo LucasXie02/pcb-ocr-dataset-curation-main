@@ -1448,6 +1448,7 @@
                     <span class="batch-count" id="gallery-selected-count">已选 0 组</span>
                     <button class="btn-batch" style="background: #17a2b8; color: white;" onclick="selectAgreeingGroups()">自动勾选一致组</button>
                     <button class="btn-batch btn-batch-accept" id="btn-batch-accept" onclick="batchAcceptSelected()" disabled>全部接受选中</button>
+                    <button class="btn-batch" style="background: #e67e22; color: white;" onclick="serverBatchAcceptAgreeing()">一键接受全部一致</button>
                     <button class="btn-batch" style="background: #28a745; color: white;" onclick="finishReview()">完成审核 → final/</button>
                 </div>
             </div>
@@ -1805,6 +1806,11 @@
                 throw new Error(data.error || '未知错误');
             }
             currentClass = cls;
+            // Sync currentSubdir from backend (fixes race condition when board has different subdirs)
+            if (data.current_subdir) {
+                currentSubdir = data.current_subdir;
+                updateSubdirDisplay();
+            }
             localStorage.setItem('ocr_review_last_class', cls);
             invalidateGalleryCache();
             galleryPage = 1;
@@ -3289,9 +3295,16 @@
                     }
                     let msg = `已移动 ${data.moved_count} 个 JSON 到 final/。`;
                     if (data.blocked_count > 0) {
-                        const blockedList = (data.blocked_images || []).slice(0, 10).join('\n  ');
-                        msg += `\n\n${data.blocked_count} 张图被阻止（含未审核的文本行）：\n  ${blockedList}`;
+                        msg += `\n\n${data.blocked_count} 张图被阻止（含未审核的文本行）：`;
+                        const details = data.blocked_details || [];
+                        details.slice(0, 10).forEach(d => {
+                            const lineInfo = (d.blocking_lines || []).map(l =>
+                                `${l.line_uid}(${l.status})`
+                            ).join(', ');
+                            msg += `\n  ${d.image_id}: ${lineInfo}`;
+                        });
                         if (data.blocked_count > 10) msg += `\n  ...及其他 ${data.blocked_count - 10} 张`;
+                        msg += `\n\n提示：可使用"一键接受全部一致"快速处理，或到审核页逐条审核。`;
                     }
                     alert(msg);
                 } else {
@@ -3986,6 +3999,34 @@
                 alert(`已自动勾选 ${count} 个一致组。请浏览确认后点击「全部接受选中」。`);
             } else {
                 alert('没有找到一致且置信度达标的组。');
+            }
+        }
+
+        async function serverBatchAcceptAgreeing() {
+            if (!confirm('服务端一键接受全部一致组（跨所有页面）？')) return;
+            try {
+                const resp = await fetch('/api/batch/accept_agreeing', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({})
+                });
+                const data = await resp.json();
+                if (data.success) {
+                    invalidateGalleryCache();
+                    galleryFilter = 'needs_review';
+                    document.getElementById('gallery-filter-select').value = 'needs_review';
+                    await loadGallery();
+                    loadQueue();
+                    if (data.accepted_count > 0) {
+                        alert(`已接受 ${data.accepted_count} 组，${data.accepted_lines} 条文本行（跨所有页面）。\n\n提示：点击"完成审核 → final/"可将已通过的移到 final/ 目录。`);
+                    } else {
+                        alert('没有新的一致组可接受（可能已全部审核或无一致组）。');
+                    }
+                } else {
+                    alert('一键接受失败: ' + (data.error || '未知错误'));
+                }
+            } catch (e) {
+                alert('一键接受失败: ' + e);
             }
         }
 
